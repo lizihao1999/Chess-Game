@@ -1,0 +1,581 @@
+#lang typed/racket
+
+(require typed/test-engine/racket-tests)
+(require "../include/cs151-core.rkt")
+(require "../include/cs151-image.rkt")
+(require "optional.rkt")
+(require "loc.rkt")
+
+;; ==== ==== ==== ====
+;; external interface
+;; all the check-expects are at the bottom of the file
+(provide PieceType
+         Player
+         (struct-out Piece)
+         Square
+         Board
+         (struct-out Move)
+         PromoteTo
+         (struct-out ChessGame)
+         starting-board  
+         new-game        
+         board-ref     
+         board-update    
+         in-check?      
+         legal-move?    
+         moves-piece     
+         moves-player   
+         checkmate?     
+         stalemate?      
+         apply-move      
+         strings->board  
+         )
+
+;; ==== ==== ==== ====
+;; data definitions
+(: strings->board : (Listof String) -> Board)
+;; use string to create board
+(define (strings->board l)
+  (local
+    {(: string->list : String -> (Listof Square))
+     (define (string->list s)
+       (append (char->list (string-ref s 0))
+          (char->list (string-ref s 1))
+          (char->list (string-ref s 2))
+          (char->list (string-ref s 3))
+          (char->list (string-ref s 4))
+          (char->list (string-ref s 5))
+          (char->list (string-ref s 6))
+          (char->list (string-ref s 7))))}
+ 
+  (append (string->list (list-ref l 7))
+          (string->list (list-ref l 6))
+          (string->list (list-ref l 5))
+          (string->list (list-ref l 4))
+          (string->list (list-ref l 3))
+          (string->list (list-ref l 2))
+          (string->list (list-ref l 1))
+          (string->list (list-ref l 0)))))
+
+    
+
+   
+(: char->list : Char -> (Listof Square))
+;; use character to create list
+(define (char->list char)
+  (match char
+    [#\- (list 'None)]
+    [#\P (list (Some (Piece 'Pawn 'Black)))]
+    [#\R (list (Some (Piece 'Rook 'Black)))]
+    [#\B (list (Some (Piece 'Bishop 'Black)))]
+    [#\N (list (Some (Piece 'Knight 'Black)))]
+    [#\K (list (Some (Piece 'King 'Black)))]
+    [#\Q (list (Some (Piece 'Queen 'Black)))]
+    [#\p (list (Some (Piece 'Pawn 'White)))]
+    [#\r (list (Some (Piece 'Rook 'White)))]
+    [#\b (list (Some (Piece 'Bishop 'White)))]
+    [#\n (list (Some (Piece 'Knight 'White)))]
+    [#\k (list (Some (Piece 'King 'White)))]
+    [#\q (list (Some (Piece 'Queen 'White)))]))
+
+
+;;below are from Adam Shaw
+(: move->str (Move -> String))
+;; build a string version of the move, for purposes of comparison
+;; note: there is a bijection between moves and strings (and must be)
+(define (move->str m)
+  (match m
+    [(Move src dst moved captured promote-to)
+     (pipes (list "Move"
+                  (loc->str src)
+                  (loc->str dst)
+                  (piece->str moved)
+                  (get-opt (opt-map piece->str captured) "None")
+                  (get-opt (opt-map symbol->string promote-to) "None")))]))
+
+(: loc->str (Loc -> String))
+;; return string representation of location
+(define (loc->str loc)
+  (match loc
+    [(Loc f r)
+     (string-append (symbol->string f) (number->string r))]))
+
+(: piece->str (Piece -> String))
+;; return string representation of piece
+(define (piece->str p)
+  (match p
+    [(Piece t pl)
+     (string-append "Piece:"
+                    (symbol->string t)
+                    ","
+                    (symbol->string pl))]))
+
+(: pipes ((Listof String) -> String))
+;; connect strings with | character in between
+;; ex: (pipes (list "a" "bb" "ccc")) ==> "a|bb|ccc"
+(define (pipes ss)
+  (match ss
+    ['() ""]
+    [(list s) s]
+    [(cons s r) (string-append s "|" (pipes r))]))
+
+(: move<? (Move Move -> Boolean))
+;; move comparison for the purposes of sorting
+(define (move<? m1 m2)
+  (string<? (move->str m1) (move->str m2)))
+
+(: sort-moves : (Listof Move) -> (Listof Move))
+;; sort a list of moves into a canonical order
+;; allowing for comparison with check-expect
+;; note: uses the built-in sort operation
+(define (sort-moves moves)
+  (sort moves move<?))
+;;
+
+;;some definitions
+(define-type PieceType
+  (U 'Pawn 'Bishop 'Knight 'Rook 'King 'Queen))
+
+(define-type Player
+  (U 'Black 'White))
+
+(define-struct Piece
+  ([type  : PieceType]
+   [color : Player]))
+
+(define-type Square
+  (Optional Piece))
+
+(define-type Board
+  (Listof Square))
+
+(define-type PromoteTo
+  (U 'Queen 'Rook 'Bishop 'Knight))
+
+(define-struct Move
+  ([src        : Loc]
+   [dst        : Loc]
+   [moved      : Piece]
+   [captured   : (Optional Piece)]
+   [promote-to : (Optional PromoteTo)]))
+
+(define-struct PaL
+  ([piece : Piece]
+   [loc : Loc]))
+
+(define-struct ChessGame
+  ([board : Board]
+   [history : (Listof Move)]))
+;;
+
+;;
+(: making-base : Player -> Board)
+;;helper function to make a line of starting status of a given color
+(define (making-base c)
+  (list (Some (Piece 'Rook c)) (Some (Piece 'Knight c)) (Some (Piece 'Bishop c)) (Some (Piece 'Queen c)) (Some (Piece 'King c)) (Some (Piece 'Bishop c)) (Some (Piece 'Knight c)) (Some (Piece 'Rook c))))
+
+(: starting-board : Board)
+;This value represents the standard starting layout of a chess board, with white at bottom (ranks 1 and 2).
+(define starting-board
+  (append (making-base 'White) (make-list 8 (Some (Piece 'Pawn 'White))) (make-list 32 'None) (make-list 8 (Some (Piece 'Pawn 'Black))) (making-base 'Black)))
+
+(: new-game : ChessGame)
+;This value contains a starting board and empty move history.
+(define new-game
+  (ChessGame starting-board '()))
+
+(: l-to-i : Symbol -> Integer)
+;;helper funtion to match a letter to an integer
+(define (l-to-i f)
+  (match f
+    ['A 1]
+    ['B 2]
+    ['C 3]
+    ['D 4]
+    ['E 5]
+    ['F 6]
+    ['G 7]
+    ['H 8]
+    [_ 1024]))
+
+(: i-to-l : Integer -> Symbol)
+;;helper funtion to match an integer to a letter
+(define (i-to-l f)
+  (match f
+    [1 'A]
+    [2 'B]
+    [3 'C]
+    [4 'D]
+    [5 'E]
+    [6 'F]
+    [7 'G]
+    [8 'H]
+    [_ 'Z]))
+
+(: s-to-f : Symbol -> File)
+;;symbol to File, just change type
+(define (s-to-f s)
+  (match s
+    ['A 'A]
+    ['B 'B]
+    ['C 'C]
+    ['D 'D]
+    ['E 'E]
+    ['F 'F]
+    ['G 'G]
+    ['H 'H]
+    [_ 'H]))
+(: i-to-r : Integer -> Rank)
+;;Integer to Rank, just change type
+(define (i-to-r s)
+  (match s
+    [1 1]
+    [2 2]
+    [3 3]
+    [4 4]
+    [5 5]
+    [6 6]
+    [7 7]
+    [8 8]
+    [_ 8]))
+
+(: add-file : File Integer -> Symbol)
+;;move a file to another file
+(define (add-file f i)
+  (i-to-l (+ (l-to-i f) i)))
+
+(: add-rank : Integer Integer -> Integer)
+;;move a rank to another rank
+(define (add-rank i1 i2)
+  (+ i1 i2))
+
+(: build-loc : Symbol Integer -> (Optional Loc))
+;;build an optional loc
+(define (build-loc f r)
+  (cond
+    [(and (<= (l-to-i f) 8) (>= (l-to-i f) 1) (<= r 8) (>= r 1)) (Some (Loc (s-to-f f) (i-to-r r)))]
+    [else 'None]))
+
+(: square=? : Square Square -> Boolean)
+;;determine whether two pieces are equal
+(define (square=? p1 p2)
+  (match* (p1 p2)
+    [((Some (Piece a b)) (Some (Piece a1 b1))) (and (symbol=? a a1) (symbol=? b b1))]
+    [('None 'None) #t]
+    [(_ _) #t]))
+    
+(: loctoboard : Loc -> Integer)
+;;given a loc, decide the location of it in the board (index + 1) actually
+(define (loctoboard l)
+  (match l
+    [(Loc f r) (+ (* r 8) (l-to-i f) -8)]))
+
+(: board-ref : Board Loc -> Square)
+;Given a board and a location on it, this function returns the contents of the specified square in the board.
+(define (board-ref b l)
+  (last (take b (loctoboard l))))
+  
+(: board-update : Board Loc Square -> Board)
+;This function returns an updated board where the contents of the specified square are replaced with the given value.
+(define (board-update b l s)
+  (append (take b (- (loctoboard l) 1)) (list s) (drop b (loctoboard l))))
+
+(: ifmove : Move ChessGame -> ChessGame)
+;;change the game accordingly by the move
+(define (ifmove m c)
+  (local
+    {(: b Board)
+     (define b (ChessGame-board c))
+     (: s Loc)
+     (define s (Move-src m))
+     (: d Loc)
+     (define d (Move-dst m))
+     (: p Piece)
+     (define p (Move-moved m))}
+    (ChessGame (board-update (board-update b d (Some p)) s 'None) (cons m (ChessGame-history c)))))
+
+(: find-pal : Player Board Integer -> (Listof PaL))
+;;find the pieces and locs of a given  color
+(define (find-pal pl b i)
+  (match b
+    ['() '()]
+    [(cons first rest) (match first
+                         ['None (find-pal pl rest (+ 1 i))]
+                         [(Some (Piece type color)) (cond
+                                                      [(symbol=? color pl) (cons (PaL (Piece type color) (Loc (s-to-f (i-to-l (remainder i 8))) (i-to-r (+ 1 (quotient (- i 1) 8)))))
+                                                                                 (find-pal pl rest (+ 1 i)))]
+                                                      [else (find-pal pl rest (+ 1 i))])])]))
+
+(: whoseturn : ChessGame -> Player)
+;;determine whose turn
+(define (whoseturn c)
+  (match c
+    [(ChessGame _ '()) 'White]
+    [(ChessGame _ (cons first rest)) (match first
+                                       [(Move _ _ m _ _) (cond
+                                                           [(symbol=? (Piece-color m) 'White) 'Black]
+                                                           [else 'White])])]))
+
+(: kingc? : Move -> Boolean)
+;;determine whether a move can capture a king
+(define (kingc? m)
+  (match m
+    [(Move _ _ _ c _) (match c
+                        ['None #f]
+                        [(Some (Piece type _)) (symbol=? type 'King)])]))
+
+(: stupid-move : Move ChessGame -> Boolean)
+;;determine whether a move makes yourself in-check
+(define (stupid-move m c)
+  (local
+    {(: c1 ChessGame)
+     (define c1 (ifmove m c))
+     (: b Board)
+     (define b (ChessGame-board c1))
+     (: w Player)
+     (define w (whoseturn c1))
+     (: list (Listof PaL))
+     (define list (find-pal w b 1))}
+    (attack list b)))
+                             
+(: in-check? : ChessGame -> Boolean)
+;;determine whether a move is stupid
+(define (in-check? c)
+  (local
+    {(: b Board)
+     (define b (ChessGame-board c))
+     (: w Player)
+     (define w (match (whoseturn c)
+                 ['Black 'White]
+                 ['White 'Black]))
+     (: list (Listof PaL))
+     (define list (find-pal w b 1))}
+    (attack list b)))
+
+(: attack : (Listof PaL) Board -> Boolean)
+;; determine whether a player can attack another's king
+(define (attack list b)
+  (match list
+    ['() #f]
+    [(cons first rest) (local
+                         {(: p Piece)
+                          (define p (PaL-piece first))
+                          (: l Loc)
+                          (define l (PaL-loc first))
+                          (: lm (Listof Move))
+                          (define lm (match (Piece-type p)
+                                       ['Rook (append (tofar 1 0 l p b) (tofar 0 1 l p b) (tofar -1 0 l p b) (tofar 0 -1 l p b))]
+                                       ['Bishop (append (tofar 1 1 l p b) (tofar -1 1 l p b) (tofar -1 -1 l p b) (tofar 1 -1 l p b))]
+                                       ['Queen (append (tofar 1 0 l p b) (tofar 0 1 l p b) (tofar -1 0 l p b) (tofar 0 -1 l p b)
+                                                       (tofar 1 1 l p b) (tofar -1 1 l p b) (tofar -1 -1 l p b) (tofar 1 -1 l p b))]
+                                       ['Knight (append (kk 2 1 l p b) (kk -2 1 l p b) (kk -2 -1 l p b) (kk 2 -1 l p b)
+                                                        (kk 1 2 l p b) (kk 1 -2 l p b) (kk -1 2 l p b) (kk -1 -2 l p b))]
+                                       ['King (append (kk 1 1 l p b) (kk 1 -1 l p b) (kk -1 1 l p b) (kk -1 -1 l p b)
+                                                      (kk 1 0 l p b) (kk 0 1 l p b) (kk 0 -1 l p b) (kk -1 0 l p b))]
+                                       ['Pawn (pawn-move l p b)]))}
+                         (or (ormap kingc? lm) (attack rest b)))]))
+
+(: move=? : Move Move -> Boolean)
+;;determine whether a move equals the other
+(define (move=? m1 m2)
+  (match* (m1 m2)
+    [((Move a b c d e) (Move a1 b1 c1 d1 e1)) (and (loc=? a a1) (loc=? b b1) (square=? (Some c) (Some c1)) (square=? d d1))]
+    [(_ _) #f]))
+
+(: move-in-list? : Move (Listof Move) -> Boolean)
+;;determine whether a move is in a lsit
+(define (move-in-list? m l)
+  (ormap (lambda ([n : Move]) (move=? n m)) l))
+
+(: legal-move? : ChessGame Move -> Boolean)
+;Return true if, and only if, the proposed move, made by the player whose turn it is, is a legal move, according to the
+;rules of chess (excluding those involving castling, en passant, and promotion). You may raise an error, or return false,
+;if the provided Move is one of these more exotic types of moves, for this assignment.
+(define (legal-move? c m)
+  (match m
+    [(Move s _ p _ _) (and (symbol=? (whoseturn c) (Piece-color p)) (move-in-list? m (moves-piece c s)))]))
+    
+(: fuhao : Integer -> Integer)
+;;return the sign of an Integer
+(define (fuhao i)
+  (cond
+    [(> i 0) 1]
+    [(< i 0) -1]
+    [else 0]))
+  
+(: tofar : Integer Integer Loc Piece Board -> (Listof Move))
+;;use a direction to deterimne the farthest place a piece can go
+(define (tofar i1 i2 l p b)
+  (local
+    {(: y (Optional Loc))
+     (define y (build-loc (add-file (Loc-file l) i1) (add-rank (Loc-rank l) i2)))}
+    (match y
+      ['None '()]
+      [_ (local
+           {(: x Square)
+            (define x (board-ref b (val-of y)))}
+           (match x
+             ['None (cons (Move l (val-of y) p 'None 'None)  
+                          (tofar (+ i1 (fuhao i1)) (+ i2 (fuhao i2)) l p b))]
+             [(Some (Piece t c)) (local
+                                   {(: z Player)
+                                    (define z (Piece-color p))}
+                                   (cond
+                                     [(symbol=? z c) '()]
+                                     [else (list (Move l (val-of y) p x 'None))]))]))])))
+
+(: kk : Integer Integer Loc Piece Board -> (Listof Move))
+;;determine the moves of a knight or King
+(define (kk i1 i2 l p b)
+  (local
+    {(: y (Optional Loc))
+     (define y (build-loc (add-file (Loc-file l) i1) (add-rank (Loc-rank l) i2)))}
+    (match y
+      ['None '()]
+      [_ (local
+           {(: x Square)
+            (define x (board-ref b (val-of y)))}
+           (match x
+             ['None (list (Move l (val-of y) p 'None 'None))]
+             [(Some (Piece t c)) (local
+                                   {(: z Player)
+                                    (define z (Piece-color p))}
+                                   (cond
+                                     [(symbol=? z c) '()]
+                                     [else (list (Move l (val-of y) p x 'None))]))]))])))
+
+(: pawn-go : Integer Integer Loc Piece Board -> (Listof Move))
+;;determine who a pawn can move without capturing
+(define (pawn-go i1 i2 l p b)
+  (local
+    {(: y (Optional Loc))
+     (define y (build-loc (add-file (Loc-file l) i1) (add-rank (Loc-rank l) i2)))}
+    (match y
+      ['None '()]
+      [(Some ll) (cond 
+                   [(square=? (board-ref b ll) 'None) (list (Move l ll p 'None 'None))]
+                   [else '()])])))
+
+(: pawn-capture : Integer Integer Loc Piece Board -> (Listof Move))
+;;determine who a pawn can move without capturing
+(define (pawn-capture i1 i2 l p b)
+  (local
+    {(: y (Optional Loc))
+     (define y (build-loc (add-file (Loc-file l) i1) (add-rank (Loc-rank l) i2)))}
+    (match y
+      ['None '()]
+      [_ (local
+           {(: x Square)
+            (define x (board-ref b (val-of y)))}
+           (match x
+             ['None '()]
+             [(Some (Piece t c)) (local
+                                   {(: z Player)
+                                    (define z (Piece-color p))}
+                                   (cond
+                                     [(symbol=? z c) '()]
+                                     [else (list (Move l (val-of y) p x 'None))]))]))]))) 
+
+(: pawn-move : Loc Piece Board -> (Listof Move))
+;;determine how a pawn can move
+(define (pawn-move l p b)
+  (local
+    {(: x Integer)
+     (define x (Loc-rank l))
+     (: y Player)
+     (define y (Piece-color p))}
+    (match y
+      ['White (cond
+                [(= x 2) (append (pawn-go 0 1 l p b) (pawn-go 0 2 l p b) (pawn-capture 1 1 l p b) (pawn-capture -1 1 l p b))]
+                [else (append (pawn-go 0 1 l p b) (pawn-capture 1 1 l p b) (pawn-capture -1 1 l p b))])]
+      ['Black (cond
+                [(= x 7) (append (pawn-go 0 -1 l p b) (pawn-go 0 -2 l p b) (pawn-capture 1 -1 l p b) (pawn-capture -1 -1 l p b))]
+                [else (append (pawn-go 0 -1 l p b) (pawn-capture 1 -1 l p b) (pawn-capture -1 -1 l p b))])])))
+
+(: moves-piece? : ChessGame Loc -> (Listof Move))
+;Given a game and a particular piece (identified by its location), give a list of moves that can legally be made with that piece. If none, return the empty list. You are under no obligation to return en passant or castling moves. If the piece is a pawn which can reach a spot at which it is eligible for promotion, you may treat this as a move with no promotion.
+(define (moves-piece? c l)
+  (local
+    {(: b Board)
+     (define b (ChessGame-board c))
+     (: x Square)
+     (define x (board-ref b l))}
+    (match x
+      ['None '()]
+      [(Some (Piece t _)) (match t
+                            ['Rook (append (tofar 1 0 l (val-of x) b) (tofar 0 1 l (val-of x) b) (tofar -1 0 l (val-of x) b) (tofar 0 -1 l (val-of x) b))]
+                            ['Bishop (append (tofar 1 1 l (val-of x) b) (tofar -1 1 l (val-of x) b) (tofar -1 -1 l (val-of x) b) (tofar 1 -1 l (val-of x) b))]
+                            ['Queen (append (tofar 1 0 l (val-of x) b) (tofar 0 1 l (val-of x) b) (tofar -1 0 l (val-of x) b) (tofar 0 -1 l (val-of x) b)
+                                            (tofar 1 1 l (val-of x) b) (tofar -1 1 l (val-of x) b) (tofar -1 -1 l (val-of x) b) (tofar 1 -1 l (val-of x) b))]
+                            ['Knight (append (kk 2 1 l (val-of x) b) (kk -2 1 l (val-of x) b) (kk -2 -1 l (val-of x) b) (kk 2 -1 l (val-of x) b)
+                                             (kk 1 2 l (val-of x) b) (kk 1 -2 l (val-of x) b) (kk -1 2 l (val-of x) b) (kk -1 -2 l (val-of x) b))]
+                            ['King (append (kk 1 1 l (val-of x) b) (kk 1 -1 l (val-of x) b) (kk -1 1 l (val-of x) b) (kk -1 -1 l (val-of x) b)
+                                           (kk 1 0 l (val-of x) b) (kk 0 1 l (val-of x) b) (kk 0 -1 l (val-of x) b) (kk -1 0 l (val-of x) b))]
+                            ['Pawn (pawn-move l (val-of x) b)])])))
+
+
+(: moves-piece : ChessGame Loc -> (Listof Move))
+;;Given a game and a particular piece (identified by its location), give a list of moves that can legally be made with that piece. If none, return the empty list. You are under no obligation to return en passant or castling moves. If the piece is a pawn which can reach a spot at which it is eligible for promotion, you may treat this as a move with no promotion.
+(define (moves-piece c l)
+  (filter (lambda ([ m : Move]) (not (stupid-move m c))) (moves-piece? c l)))
+
+(: moves-player : ChessGame -> (Listof Move))
+;;For the player whose turn it currently is, determine a list of all legal moves that player could make. The same caveats for en passant, castling, and promotion apply as above.
+(define (moves-player c)
+  (local
+    {(: b Board)
+     (define b (ChessGame-board c))
+     (: w Player)
+     (define w (whoseturn c))
+     (: list (Listof PaL))
+     (define list (find-pal w b 1))}
+    (filter (lambda ([ m : Move]) (not (stupid-move m c))) (move-range list b))))
+    
+(: move-range : (Listof PaL) Board -> (Listof Move))
+;helper to list a player's ranges of move
+(define (move-range list b)
+  (match list
+    ['() '()]
+    [(cons first rest) (local
+                         {(: p Piece)
+                          (define p (PaL-piece first))
+                          (: l Loc)
+                          (define l (PaL-loc first))
+                          (: lm (Listof Move))
+                          (define lm (match (Piece-type p)
+                                       ['Rook (append (tofar 1 0 l p b) (tofar 0 1 l p b) (tofar -1 0 l p b) (tofar 0 -1 l p b))]
+                                       ['Bishop (append (tofar 1 1 l p b) (tofar -1 1 l p b) (tofar -1 -1 l p b) (tofar 1 -1 l p b))]
+                                       ['Queen (append (tofar 1 0 l p b) (tofar 0 1 l p b) (tofar -1 0 l p b) (tofar 0 -1 l p b)
+                                                       (tofar 1 1 l p b) (tofar -1 1 l p b) (tofar -1 -1 l p b) (tofar 1 -1 l p b))]
+                                       ['Knight (append (kk 2 1 l p b) (kk -2 1 l p b) (kk -2 -1 l p b) (kk 2 -1 l p b)
+                                                        (kk 1 2 l p b) (kk 1 -2 l p b) (kk -1 2 l p b) (kk -1 -2 l p b))]
+                                       ['King (append (kk 1 1 l p b) (kk 1 -1 l p b) (kk -1 1 l p b) (kk -1 -1 l p b)
+                                                      (kk 1 0 l p b) (kk 0 1 l p b) (kk 0 -1 l p b) (kk -1 0 l p b))]
+                                       ['Pawn (pawn-move l p b)]))}
+                         (append lm (move-range rest b)))]))    
+
+(: checkmate? : ChessGame -> Boolean)
+;Return true if and only if the player whose turn it currently is, is checkmated.
+(define (checkmate? c)
+  (cond
+    [(not (in-check? c)) #f]
+    [else (match (moves-player c)
+            ['() #t]
+            [_ #f])]))
+ 
+(: stalemate? : ChessGame -> Boolean)
+;Return true if and only if the player whose turn it currently is, is not in check but yet has no available moves.
+(define (stalemate? c)
+  (cond
+    [(in-check? c) #f]
+    [else (match (moves-player c)
+            ['() #t]
+            [_ #f])]))
+
+(: apply-move : ChessGame Move -> ChessGame)
+;Make the specified move for the player whose turn it is, modifying the board accordingly. Update the history of moves. Raise an error if the desired move is not legal according to legal-move?. You may assume, for the purposes of this phase of the project, that the Move is not one of the exotic moves.
+(define (apply-move c m)
+  (cond
+    [(not (legal-move? c m)) (error "can not apply-move")]
+    [else (ifmove m c)]))
+
